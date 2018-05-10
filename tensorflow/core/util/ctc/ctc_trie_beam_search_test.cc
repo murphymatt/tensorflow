@@ -36,52 +36,6 @@ const int test_labels[] = {19, 7, 4, 16, 20, 8, 2, 10, 1, 17, 14, 22, 13, 5, 14,
   23, 9, 20, 12, 15, 18, 14, 21, 4, 17, 19, 7, 4, 11, 0, 25, 24, 3, 14, 6};
 const int test_label_count = 35;
 
-float ExpandBeamFn(TrieBeamScorer *scorer,
-  const int labels[],
-  const int label_count) {
-    TrieBeamState states[2];
-    scorer->InitializeState(&states[0]);
-
-    int from_label = 27;
-    float score = 0.0f;
-    std::vector<int> incomplete_word;
-    for (int i=0; i<label_count; ++i) {
-      int to_label = labels[i];
-      TrieBeamState &from_state = states[i%2];
-      TrieBeamState &to_state   = states[(i+1)%2];
-
-      scorer->ExpandState(from_state, from_label, &to_state, to_label);
-      score = scorer->GetStateExpansionScore(to_state, score);
-
-      incomplete_word = to_state.incomplete_word;
-      from_label = to_label;
-    }
-
-    TrieBeamState &endState = states[label_count%2];
-    scorer->ExpandStateEnd(&endState);
-    score += scorer->GetStateEndExpansionScore(endState);
-
-    return score;
-}
-
-/*
-TEST(CtcBeamSearch, ExpandStateNoRepeatsNoBlanks) {
-  std::vector<int> the    {19,  7,  4};
-  std::vector<int> quick  {16, 20,  8,   2,  10};
-  std::vector<int> brown  {1,  17, 14,  22,  13};
-  std::vector<int> fox    {5,  14, 23};
-  std::vector<int> jumps  {9,  20, 12,  15,  18};
-  std::vector<int> over   {14, 21,  4,  17};
-  std::vector<int> lazy   {11,  0, 25,  24};
-  std::vector<int> dog    {3,  14,  6};
-  std::vector<std::vector<int>> vocab_list {
-    the, quick, brown, fox, jumps, over, lazy, dog};
-
-  TrieBeamScorer *scorer = new TrieBeamScorer(vocab_list, 27, true);
-  ExpandBeamFn(scorer, test_labels, test_label_count);
-}
-*/
-
 TEST(CtcBeamSearch, ScoreState) {
   const int batch_size = 1;
   const int timesteps = 3;
@@ -460,9 +414,6 @@ TEST(CtcBeamSearch, DecodingWithDisjointDict) {
   EXPECT_TRUE(
       dictionary_decoder.Decode(seq_len, inputs, &dict_outputs, &scores).ok());
   for (int path = 0; path < top_paths; ++path) {
-    for (auto i : dict_outputs[path][0])
-      std::cout << i;
-    std::cout << std::endl << scores(path) << std::endl;
     EXPECT_EQ((dict_outputs[path][0]).size(), 0);
   }
 }

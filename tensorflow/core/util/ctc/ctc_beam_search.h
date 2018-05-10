@@ -208,8 +208,8 @@ Status CTCBeamSearchDecoder<CTCBeamState, CTCBeamComparer>::Decode(
       return status;
     }
 
-    //CHECK_EQ(top_n, beam_log_probabilities.size());
-    //CHECK_EQ(beams.size(), beam_log_probabilities.size());
+    CHECK_EQ(top_n, beam_log_probabilities.size());
+    CHECK_EQ(beams.size(), beam_log_probabilities.size());
 
     //for (int i = 0; i < top_n; ++i) {
     for (int i = 0; i < beam_log_probabilities.size(); ++i) {

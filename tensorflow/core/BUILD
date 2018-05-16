@@ -225,6 +225,7 @@ ADDITIONAL_CORE_PROTO_SRCS = [
     "protobuf/named_tensor.proto",
     "protobuf/saved_model.proto",
     "protobuf/tensorflow_server.proto",
+    "protobuf/transport_options.proto",
     "util/test_log.proto",
 ]
 
@@ -303,6 +304,7 @@ PLATFORM_OTHER_HDRS = [
     "platform/cpu_info.h",
     "platform/cpu_feature_guard.h",
     "platform/dynamic_annotations.h",
+    "platform/error.h",
     "platform/env.h",
     "platform/file_system.h",
     "platform/file_system_helper.h",
@@ -452,9 +454,7 @@ cc_library(
     srcs = ["platform/stacktrace_handler.cc"],
     hdrs = ["platform/stacktrace_handler.h"],
     deps = [
-        ":abi",
         ":lib_platform",
-        ":stacktrace",
     ],
 )
 
@@ -801,8 +801,6 @@ cc_library(
         "//tensorflow/core:lib_internal",
         "//tensorflow/core:stream_executor",
         "//tensorflow/core/kernels:bounds_check_lib",
-        "//third_party/eigen3",
-        "@farmhash_archive//:farmhash",
     ],
     alwayslink = 1,
 )
@@ -1515,6 +1513,13 @@ tf_pyclif_proto_library(
     name = "example/feature_pyclif",
     proto_lib = ":protos_all_cc",
     proto_srcfile = "example/feature.proto",
+    visibility = ["//visibility:public"],
+)
+
+tf_pyclif_proto_library(
+    name = "framework/cost_graph_pyclif",
+    proto_lib = ":protos_all_cc",
+    proto_srcfile = "framework/cost_graph.proto",
     visibility = ["//visibility:public"],
 )
 
@@ -2359,6 +2364,7 @@ CORE_CPU_LIB_HEADERS = CORE_CPU_BASE_HDRS + [
     "common_runtime/executor.h",
     "common_runtime/graph_optimizer.h",
     "common_runtime/local_device.h",
+    "common_runtime/lower_if_op.h",
     "common_runtime/memory_types.h",
     "common_runtime/mkl_cpu_allocator.h",
     "common_runtime/optimization_registry.h",
@@ -2409,6 +2415,7 @@ tf_cuda_library(
         "common_runtime/graph_optimizer.cc",
         "common_runtime/graph_runner.cc",
         "common_runtime/local_device.cc",
+        "common_runtime/lower_if_op.cc",
         "common_runtime/memory_types.cc",
         "common_runtime/mkl_cpu_allocator.cc",
         "common_runtime/optimization_registry.cc",
@@ -2566,6 +2573,7 @@ tf_cuda_library(
     ],
     copts = tf_copts(),
     cuda_deps = tf_additional_cupti_wrapper_deps() + tf_additional_device_tracer_cuda_deps(),
+    visibility = ["//visibility:private"],
     deps = [
         ":core_cpu_internal",
         ":lib",
@@ -2808,8 +2816,6 @@ cc_library(
         # we now need at least "str_util".
         ":lib",
         ":lib_platform",
-        ":stacktrace_handler",
-        ":test_lite",
         "//tensorflow/core/platform/default/build_config:test_lite_main",
     ],
     alwayslink = 1,
@@ -4069,6 +4075,29 @@ tf_cc_test_gpu(
         ":testlib",
         "//tensorflow/cc:cc_ops",
         "//tensorflow/core/kernels:ops_util",
+    ],
+)
+
+tf_cc_tests(
+    name = "common_runtime_lower_if_op_test",
+    size = "small",
+    srcs = ["common_runtime/lower_if_op_test.cc"],
+    deps = [
+        ":all_kernels",
+        ":core_cpu",
+        ":core_cpu_internal",
+        ":direct_session",
+        ":framework",
+        ":framework_internal",
+        ":lib",
+        ":test",
+        ":test_main",
+        ":testlib",
+        "//tensorflow/cc:cc_ops",
+        "//tensorflow/cc:cc_ops_internal",
+        "//tensorflow/cc:client_session",
+        "//tensorflow/cc:function_ops",
+        "//tensorflow/cc:ops",
     ],
 )
 

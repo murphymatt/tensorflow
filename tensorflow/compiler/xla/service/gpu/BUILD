@@ -1,6 +1,8 @@
 # Description:
 #   GPU-specific components in XLA service implementation.
 
+load("//tensorflow/compiler/xla:xla.bzl", "xla_proto_library")
+
 licenses(["notice"])  # Apache 2.0
 
 package(default_visibility = [":friends"])
@@ -22,6 +24,11 @@ filegroup(
 )
 
 load("//tensorflow:tensorflow.bzl", "tf_cc_test")
+
+xla_proto_library(
+    name = "backend_configs",
+    srcs = ["backend_configs.proto"],
+)
 
 cc_library(
     name = "gpu_constants",
@@ -133,6 +140,7 @@ cc_library(
         "ir_emitter_unnested.h",
     ],
     deps = [
+        ":backend_configs",
         ":cudnn_convolution_runner",
         ":elemental_ir_emitter",
         ":gpu_constants",
@@ -266,6 +274,7 @@ cc_library(
         "while_thunk.h",
     ],
     deps = [
+        ":backend_configs",
         ":buffer_allocations",
         ":cudnn_convolution_runner",
         ":infeed_manager",
@@ -322,6 +331,7 @@ cc_library(
     srcs = ["cudnn_convolution_algorithm_picker.cc"],
     hdrs = ["cudnn_convolution_algorithm_picker.h"],
     deps = [
+        ":backend_configs",
         ":cudnn_convolution_runner",
         ":gpu_executable",
         ":ir_emission_utils",
@@ -406,9 +416,9 @@ tf_cc_test(
         "//tensorflow/compiler/xla:util",
         "//tensorflow/compiler/xla/service:hlo",
         "//tensorflow/compiler/xla/service:hlo_matchers",
+        "//tensorflow/compiler/xla/service:hlo_parser",
         "//tensorflow/compiler/xla/tests:hlo_test_base",
         "//tensorflow/compiler/xla/tests:xla_internal_test_main",
-        "//tensorflow/compiler/xla/tools/parser:hlo_parser",
     ],
 )
 
@@ -450,9 +460,9 @@ tf_cc_test(
         ":instruction_fusion",
         "//tensorflow/compiler/xla:test_helpers",
         "//tensorflow/compiler/xla/service:hlo_matchers",
+        "//tensorflow/compiler/xla/service:hlo_parser",
         "//tensorflow/compiler/xla/tests:hlo_test_base",
         "//tensorflow/compiler/xla/tests:xla_internal_test_main",
-        "//tensorflow/compiler/xla/tools/parser:hlo_parser",
     ],
 )
 

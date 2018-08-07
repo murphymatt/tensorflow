@@ -73,6 +73,7 @@ bool IsAlwaysDuplicable(const HloInstruction& instruction) {
     case HloOpcode::kGt:
     case HloOpcode::kImag:
     case HloOpcode::kInfeed:
+    case HloOpcode::kIota:
     case HloOpcode::kIsFinite:
     case HloOpcode::kLe:
     case HloOpcode::kLt:
@@ -83,6 +84,7 @@ bool IsAlwaysDuplicable(const HloInstruction& instruction) {
     case HloOpcode::kNegate:
     case HloOpcode::kNot:
     case HloOpcode::kOr:
+    case HloOpcode::kXor:
     case HloOpcode::kOutfeed:
     case HloOpcode::kPad:
     case HloOpcode::kReal:
@@ -96,9 +98,10 @@ bool IsAlwaysDuplicable(const HloInstruction& instruction) {
     case HloOpcode::kShiftRightLogical:
     case HloOpcode::kSlice:
     case HloOpcode::kSubtract:
-    case HloOpcode::kGenerateToken:
+    case HloOpcode::kAfterAll:
     case HloOpcode::kTranspose:
     case HloOpcode::kTuple:
+    case HloOpcode::kTupleSelect:
       return false;
 
     // Cheap instructions for reals, but expensive for complex.
@@ -138,6 +141,7 @@ bool IsAlwaysDuplicable(const HloInstruction& instruction) {
     case HloOpcode::kReduceWindow:
     case HloOpcode::kRemainder:
     case HloOpcode::kRng:
+    case HloOpcode::kScatter:
     case HloOpcode::kSelectAndScatter:
     case HloOpcode::kSend:
     case HloOpcode::kSendDone:
@@ -237,6 +241,30 @@ InstructionFusion::ComputeGloballyUnfusable(
       if (EffectivelyAtMostUnary(producer)) {
         continue;
       }
+
+      // If the total size of the inputs is less than or equal to the total size
+      // of the outputs for the producer then duplicating it won't increase the
+      // memory traffic. In that case, we do not forbid fusion of the operation
+      // here.
+      auto total_size = [](const Shape& shape) {
+        int64 size = 0;
+        ShapeUtil::ForEachSubshape(
+            shape,
+            [&size](const Shape& subshape, const ShapeIndex& shape_index) {
+              if (ShapeUtil::IsArray(subshape)) {
+                size += ShapeUtil::ElementsIn(subshape);
+              }
+            });
+        return size;
+      };
+      int64 operands_size = 0;
+      for (const HloInstruction* op : producer->operands()) {
+        operands_size += total_size(op->shape());
+      }
+      if (operands_size <= total_size(producer->shape())) {
+        continue;
+      }
+
       // Otherwise we will forbid fusing the op unless we can fuse it into
       // all of its consumers on all paths.
       //

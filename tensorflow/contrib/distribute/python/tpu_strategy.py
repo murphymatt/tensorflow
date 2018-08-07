@@ -21,12 +21,19 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-from tensorflow.contrib import tpu
+from tensorflow.contrib.distribute.python import cross_tower_ops as cross_tower_ops_lib
 from tensorflow.contrib.distribute.python import one_device_strategy
+from tensorflow.contrib.distribute.python import values
 from tensorflow.contrib.tpu.python.ops import tpu_ops
+from tensorflow.contrib.tpu.python.tpu import tpu
+from tensorflow.contrib.tpu.python.tpu import training_loop
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import ops
+from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import control_flow_ops
+from tensorflow.python.ops import math_ops
+from tensorflow.python.ops import variable_scope as vs
+from tensorflow.python.training import device_util
 from tensorflow.python.util import nest
 
 
@@ -36,19 +43,22 @@ class TPUStrategy(one_device_strategy.OneDeviceStrategy):
   def __init__(self, num_cores_per_host=2):
     # TODO(isaprykin): Generalize the defaults.  They are currently tailored for
     # the unit test.
-    super(TPUStrategy, self).__init__('/cpu:0')
+    super(TPUStrategy, self).__init__('/device:CPU:0')
     # TODO(isaprykin): Auto-detect number of cores and hosts.
     self._num_cores_per_host = num_cores_per_host
     # TODO(priyag): This should not be hardcoded here.
-    self._host = '/task:0/device:CPU:0'
+    self._host = '/device:CPU:0'
 
   def distribute_dataset(self, dataset_fn):
     # TODO(priyag): Perhaps distribute across cores here.
     return self._call_dataset_fn(dataset_fn)
 
   # TODO(priyag): Deal with OutOfRange errors.
-  def run_steps_on_dataset(self, fn, iterator, iterations):
-    # Enqueue ops
+  # TODO(sourabhbajaj): Remove the initial_loop_values parameter when we have
+  # a mechanism to infer the outputs of `fn`. Pending b/110550782.
+  def _run_steps_on_dataset(self, fn, iterator, iterations,
+                            initial_loop_values=None):
+
     shapes = nest.flatten(iterator.output_shapes)
     if any([not s.is_fully_defined() for s in shapes]):
       raise ValueError(
@@ -87,35 +97,74 @@ class TPUStrategy(one_device_strategy.OneDeviceStrategy):
           [constant_op.constant(0)],
           parallel_iterations=1)
 
-    # Dequeue ops
     def dequeue_fn():
-      dequeued = tpu.infeed_dequeue_tuple(dtypes=types, shapes=shapes)
+      dequeued = tpu_ops.infeed_dequeue_tuple(dtypes=types, shapes=shapes)
       return nest.pack_sequence_as(iterator.output_shapes, dequeued)
 
     # Wrap `fn` for repeat.
-    run_fn = lambda: fn(dequeue_fn())
+    if initial_loop_values is None:
+      initial_loop_values = []
+    ctx = values.MultiStepContext(initial_loop_values)
+    def run_fn(*args, **kwargs):
+      del args, kwargs
+      fn_result = fn(ctx, dequeue_fn())
+      if ctx.last_step_outputs is None:
+        ctx.last_step_outputs = []
+      with ops.control_dependencies([fn_result]):
+        return array_ops.identity(ctx.last_step_outputs)
 
-    # Repeat
+    # TODO(sourabhbajaj): The input to while loop should be based on the output
+    # type of the step_fn
     def iterate_on_tpu():
-      return tpu.repeat(iterations, run_fn, [])
+      return training_loop.repeat(iterations, run_fn, [initial_loop_values])
 
-    # Re-write and distribute computation.
-    tpu_result = tpu.batch_parallel(
-        iterate_on_tpu, [], num_shards=self._num_cores_per_host)
+    replicate_inputs = [[]] * self._num_cores_per_host
+    outputs = tpu.replicate(iterate_on_tpu, replicate_inputs)
+    last_step_tensor_outputs = [list(x) for x in zip(*outputs)]
 
-    return control_flow_ops.group(tpu_result, enqueue_ops)
+    # Take index [0] of last_step_tensor_outputs as we wrapped
+    # initial_loop_values in a list in the `repeat` call.
+    return (control_flow_ops.group(last_step_tensor_outputs, enqueue_ops),
+            last_step_tensor_outputs[0], ctx)
 
   def _call_for_each_tower(self, fn, *args, **kwargs):
     kwargs.pop('run_concurrently', None)
     with one_device_strategy._OneDeviceTowerContext(self):  # pylint: disable=protected-access
       return fn(*args, **kwargs)
 
-  def _reduce(self, method_string, value, destinations):
-    del destinations  # TPU is graph mode only.  Rely on implicit Send/Recv.
-    if method_string == 'mean':
-      # TODO(jhseu):  Revisit once we support model-parallelism.
-      value *= (1. / self._num_cores_per_host)
-    return tpu_ops.cross_replica_sum(value)
+  def get_initialization_ops(self):
+    return [tpu.initialize_system()]
+
+  def get_finalize_ops(self):
+    return [tpu.shutdown_system()]
+
+  def _reduce(self, aggregation, value, destinations):
+    graph = ops.get_default_graph()
+    context = graph._get_control_flow_context()  # pylint: disable=protected-access
+    # If we're inside the ReplicateContext, reduction should be done using
+    # CrossReplicaSum while outside we can directly use an add_n op.
+    while context:
+      if isinstance(context, tpu.TPUReplicateContext):
+        if aggregation == vs.VariableAggregation.MEAN:
+          # TODO(jhseu):  Revisit once we support model-parallelism.
+          value *= (1. / self._num_cores_per_host)
+        return tpu_ops.cross_replica_sum(value)
+      context = context.outer_context
+
+    # Validate that the destination is same as the host device
+    # Note we don't do this when in replicate context as the reduction is
+    # performed on the TPU device itself.
+    devices = cross_tower_ops_lib.get_devices_from(destinations)
+    if len(devices) == 1:
+      assert device_util.canonicalize(devices[0]) == device_util.canonicalize(
+          self._host)
+    else:
+      raise ValueError('Multiple devices are not supported for TPUStrategy')
+
+    output = math_ops.add_n(value)
+    if aggregation == vs.VariableAggregation.MEAN:
+      return output * (1. / len(value))
+    return output
 
   @property
   def num_towers(self):

@@ -51,6 +51,7 @@ limitations under the License.
 #include "tensorflow/core/lib/gtl/flatmap.h"
 #include "tensorflow/core/lib/gtl/map_util.h"
 #include "tensorflow/core/lib/gtl/stl_util.h"
+#include "tensorflow/core/lib/random/random.h"
 #include "tensorflow/core/platform/env.h"
 #include "tensorflow/core/platform/mutex.h"
 #include "tensorflow/core/platform/thread_annotations.h"
@@ -108,7 +109,8 @@ tensorflow::Status GetAllRemoteDevices(
 }
 
 tensorflow::Status CreateRemoteContexts(
-    const std::vector<string>& remote_workers,
+    const std::vector<string>& remote_workers, int64 rendezvous_id,
+    const tensorflow::ServerDef& server_def,
     tensorflow::eager::EagerClientCache* remote_eager_workers, bool async,
     tensorflow::gtl::FlatMap<string, tensorflow::uint64>* remote_contexts) {
   for (int i = 0; i < remote_workers.size(); i++) {
@@ -116,12 +118,14 @@ tensorflow::Status CreateRemoteContexts(
 
     tensorflow::eager::CreateContextRequest request;
     tensorflow::eager::CreateContextResponse response;
+    request.set_rendezvous_id(rendezvous_id);
     tensorflow::DeviceNameUtils::ParsedName parsed_name;
     if (!tensorflow::DeviceNameUtils::ParseFullName(remote_worker,
                                                     &parsed_name)) {
       return tensorflow::errors::InvalidArgument(
           "Unable to parse ", remote_worker, " as a device name");
     }
+    *request.mutable_server_def() = server_def;
     request.mutable_server_def()->set_job_name(parsed_name.job);
     request.mutable_server_def()->set_task_index(parsed_name.task);
     request.set_async(async);
@@ -146,25 +150,27 @@ tensorflow::Status CreateRemoteContexts(
   return tensorflow::Status::OK();
 }
 
-tensorflow::Status NewRemoteAwareTFE_Context(const TFE_ContextOptions* opts,
-                                             TFE_Context** ctx) {
+tensorflow::Status UpdateTFE_ContextWithServerDef(
+    const tensorflow::ServerDef& server_def, TFE_Context* ctx) {
   // We don't use the TF_RETURN_IF_ERROR macro directly since that destroys the
   // server object (which currently CHECK-fails) and we miss the error, instead,
   // we log the error, and then return to allow the user to see the error
   // message.
-#define LOG_AND_RETURN_IF_ERROR(...)                     \
-  do {                                                   \
-    const ::tensorflow::Status _status = (__VA_ARGS__);  \
-    LOG(ERROR) << _status.error_message();               \
-    if (TF_PREDICT_FALSE(!_status.ok())) return _status; \
-  } while (0)
+#define LOG_AND_RETURN_IF_ERROR(...)                    \
+  do {                                                  \
+    const ::tensorflow::Status _status = (__VA_ARGS__); \
+    if (TF_PREDICT_FALSE(!_status.ok())) {              \
+      LOG(ERROR) << _status.error_message();            \
+      return _status;                                   \
+    }                                                   \
+  } while (0);
 
-  string worker_name = tensorflow::strings::StrCat(
-      "/job:", opts->server_def.job_name(),
-      "/replica:0/task:", opts->server_def.task_index());
+  string worker_name =
+      tensorflow::strings::StrCat("/job:", server_def.job_name(),
+                                  "/replica:0/task:", server_def.task_index());
 
   std::unique_ptr<tensorflow::ServerInterface> server;
-  LOG_AND_RETURN_IF_ERROR(tensorflow::NewServer(opts->server_def, &server));
+  LOG_AND_RETURN_IF_ERROR(tensorflow::NewServer(server_def, &server));
 
   tensorflow::GrpcServer* grpc_server =
       dynamic_cast<tensorflow::GrpcServer*>(server.get());
@@ -174,6 +180,8 @@ tensorflow::Status NewRemoteAwareTFE_Context(const TFE_ContextOptions* opts,
   }
 
   LOG_AND_RETURN_IF_ERROR(grpc_server->Start());
+
+  int64 rendezvous_id = tensorflow::random::New64();
 
   std::vector<string> remote_workers;
   grpc_server->master_env()->worker_cache->ListWorkers(&remote_workers);
@@ -193,18 +201,30 @@ tensorflow::Status NewRemoteAwareTFE_Context(const TFE_ContextOptions* opts,
 
   // Initialize remote eager workers.
   tensorflow::gtl::FlatMap<string, tensorflow::uint64> remote_contexts;
-  LOG_AND_RETURN_IF_ERROR(CreateRemoteContexts(remote_workers,
-                                               remote_eager_workers.get(),
-                                               opts->async, &remote_contexts));
+  LOG_AND_RETURN_IF_ERROR(CreateRemoteContexts(
+      remote_workers, rendezvous_id, server_def, remote_eager_workers.get(),
+      ctx->context.Async(), &remote_contexts));
 
   tensorflow::RemoteRendezvous* r =
-      grpc_server->worker_env()->rendezvous_mgr->Find(0);
+      grpc_server->worker_env()->rendezvous_mgr->Find(rendezvous_id);
+
+  auto session_name = tensorflow::strings::StrCat("eager_", rendezvous_id);
+  TF_RETURN_IF_ERROR(grpc_server->worker_env()->session_mgr->CreateSession(
+      session_name, server_def, true));
+
+  std::shared_ptr<tensorflow::WorkerSession> worker_session;
+  TF_RETURN_IF_ERROR(
+      grpc_server->worker_env()->session_mgr->WorkerSessionForSession(
+          session_name, &worker_session));
+
+  // Initialize remote tensor communication based on worker session.
+  TF_RETURN_IF_ERROR(r->Initialize(worker_session.get()));
 
   auto* device_mgr = grpc_server->worker_env()->device_mgr;
-  *ctx = new TFE_Context(opts->session_options.options, opts->policy,
-                         opts->async, device_mgr, r, std::move(server),
-                         std::move(remote_eager_workers),
-                         std::move(remote_device_mgr), remote_contexts);
+
+  ctx->context.InitializeRemote(
+      std::move(server), std::move(remote_eager_workers),
+      std::move(remote_device_mgr), remote_contexts, r, device_mgr);
 
   return tensorflow::Status::OK();
 #undef LOG_AND_RETURN_IF_ERROR
@@ -229,15 +249,6 @@ void TFE_ContextOptionsSetDevicePlacementPolicy(
   options->policy = policy;
 }
 
-TF_CAPI_EXPORT extern void TFE_ContextOptionsSetServerDef(
-    TFE_ContextOptions* options, const void* proto, size_t proto_len,
-    TF_Status* status) {
-  if (!options->server_def.ParseFromArray(proto, proto_len)) {
-    status->status = tensorflow::errors::InvalidArgument(
-        "Invalid tensorflow.ServerDef protocol buffer");
-  }
-}
-
 TF_CAPI_EXPORT extern void TFE_ContextSetAsyncForThread(TFE_Context* ctx,
                                                         unsigned char async,
                                                         TF_Status* status) {
@@ -247,12 +258,6 @@ TF_CAPI_EXPORT extern void TFE_ContextSetAsyncForThread(TFE_Context* ctx,
 void TFE_DeleteContextOptions(TFE_ContextOptions* options) { delete options; }
 
 TFE_Context* TFE_NewContext(const TFE_ContextOptions* opts, TF_Status* status) {
-  if (!opts->server_def.job_name().empty()) {
-    TFE_Context* ctx = nullptr;
-    status->status = NewRemoteAwareTFE_Context(opts, &ctx);
-    return ctx;
-  }
-
   std::vector<tensorflow::Device*> devices;
   status->status = tensorflow::DeviceFactory::AddDevices(
       opts->session_options.options, "/job:localhost/replica:0/task:0",
@@ -268,7 +273,7 @@ TFE_Context* TFE_NewContext(const TFE_ContextOptions* opts, TF_Status* status) {
                          opts->async, std::move(device_mgr), r);
 }
 
-void TFE_DeleteContext(TFE_Context* ctx, TF_Status* status) { delete ctx; }
+void TFE_DeleteContext(TFE_Context* ctx) { delete ctx; }
 
 TF_DeviceList* TFE_ContextListDevices(TFE_Context* ctx, TF_Status* status) {
   TF_DeviceList* list = new TF_DeviceList;
@@ -280,6 +285,20 @@ TF_DeviceList* TFE_ContextListDevices(TFE_Context* ctx, TF_Status* status) {
 }
 
 void TFE_ContextClearCaches(TFE_Context* ctx) { ctx->context.ClearCaches(); }
+
+// Set server_def on the context, possibly updating it.
+TF_CAPI_EXPORT extern void TFE_ContextSetServerDef(TFE_Context* ctx,
+                                                   const void* proto,
+                                                   size_t proto_len,
+                                                   TF_Status* status) {
+  tensorflow::ServerDef server_def;
+  if (!server_def.ParseFromArray(proto, proto_len)) {
+    status->status = tensorflow::errors::InvalidArgument(
+        "Invalid tensorflow.ServerDef protocol buffer");
+    return;
+  }
+  status->status = UpdateTFE_ContextWithServerDef(server_def, ctx);
+}
 
 void TFE_ContextSetThreadLocalDevicePlacementPolicy(
     TFE_Context* ctx, TFE_ContextDevicePlacementPolicy policy) {
@@ -316,7 +335,7 @@ TFE_TensorHandle* TFE_NewTensorHandle(TF_Tensor* t, TF_Status* status) {
 }
 
 void TFE_DeleteTensorHandle(TFE_TensorHandle* h) {
-  DCHECK(h);
+  if (h == nullptr) return;
   if (h->handle) {
     h->handle->Unref();
   }
@@ -328,19 +347,34 @@ TF_DataType TFE_TensorHandleDataType(TFE_TensorHandle* h) {
 }
 
 int TFE_TensorHandleNumDims(TFE_TensorHandle* h, TF_Status* status) {
-  const tensorflow::Tensor* t = nullptr;
-  status->status = h->handle->Tensor(&t);
-  return t == nullptr ? 0 : t->dims();
+  if (h == nullptr || h->handle == nullptr) {
+    status->status = tensorflow::errors::InvalidArgument(
+        "The passed in handle is a nullptr");
+    return -1;
+  }
+  int result;
+  status->status = h->handle->NumDims(&result);
+  return result;
 }
 
 int64_t TFE_TensorHandleDim(TFE_TensorHandle* h, int dim_index,
                             TF_Status* status) {
-  const tensorflow::Tensor* t = nullptr;
-  status->status = h->handle->Tensor(&t);
-  return t == nullptr ? 0 : t->dim_size(dim_index);
+  if (h == nullptr || h->handle == nullptr) {
+    status->status = tensorflow::errors::InvalidArgument(
+        "The passed in handle is a nullptr");
+    return -1;
+  }
+  tensorflow::int64 result;
+  status->status = h->handle->Dim(dim_index, &result);
+  return result;
 }
 
 const char* TFE_TensorHandleDeviceName(TFE_TensorHandle* h, TF_Status* status) {
+  if (h == nullptr || h->handle == nullptr) {
+    status->status = tensorflow::errors::InvalidArgument(
+        "The passed in handle is a nullptr");
+    return nullptr;
+  }
   tensorflow::Device* d = nullptr;
   status->status = h->handle->OpDevice(&d);
   return (d == nullptr) ? "/job:localhost/replica:0/task:0/device:CPU:0"
@@ -348,6 +382,11 @@ const char* TFE_TensorHandleDeviceName(TFE_TensorHandle* h, TF_Status* status) {
 }
 
 TF_Tensor* TFE_TensorHandleResolve(TFE_TensorHandle* h, TF_Status* status) {
+  if (h == nullptr || h->handle == nullptr) {
+    status->status = tensorflow::errors::InvalidArgument(
+        "The passed in handle is a nullptr");
+    return nullptr;
+  }
   // TODO(agarwal): move this implementation inside TFE_TensorHandle.
   tensorflow::Device* d = nullptr;
   tensorflow::Device* op_device = nullptr;
@@ -644,17 +683,17 @@ TFE_TensorHandle* TFE_NewTensorHandle(const tensorflow::Tensor& t) {
 
 const tensorflow::Tensor* TFE_TensorHandleUnderlyingTensorInHostMemory(
     TFE_TensorHandle* h, TF_Status* status) {
-  tensorflow::Device* d = nullptr;
-  tensorflow::Device* op_device = nullptr;
-  const tensorflow::Tensor* t = nullptr;
-  status->status = h->handle->TensorAndDevice(&t, &d, &op_device);
-  if (!status->status.ok()) return nullptr;
-  if (d != nullptr) {
+  if (!h->handle->OnHostCPU()) {
     status->status = tensorflow::errors::FailedPrecondition(
         "TFE_TensorHandle is placed in device (not host) memory. Cannot return "
         "a tensorflow::Tensor");
     return nullptr;
   }
+  tensorflow::Device* d = nullptr;
+  tensorflow::Device* op_device = nullptr;
+  const tensorflow::Tensor* t = nullptr;
+  status->status = h->handle->TensorAndDevice(&t, &d, &op_device);
+  if (!status->status.ok()) return nullptr;
   return t;
 }
 

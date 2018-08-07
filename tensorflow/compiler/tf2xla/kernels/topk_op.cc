@@ -13,11 +13,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#include "tensorflow/compiler/tf2xla/xla_helpers.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
-#include "tensorflow/compiler/xla/client/xla_client/xla_builder.h"
-#include "tensorflow/compiler/xla/literal_util.h"
+#include "tensorflow/compiler/xla/client/lib/numeric.h"
+#include "tensorflow/compiler/xla/client/lib/sorting.h"
+#include "tensorflow/compiler/xla/client/xla_builder.h"
+#include "tensorflow/compiler/xla/literal.h"
 #include "tensorflow/core/framework/kernel_def_builder.h"
 #include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/kernels/no_op.h"
@@ -40,72 +41,27 @@ class TopKOp : public XlaOpKernel {
     OP_REQUIRES(context, input_shape.dims() >= 1,
                 errors::InvalidArgument("input must be >= 1-D, got shape ",
                                         input_shape.DebugString()));
+    int last_dim = input_shape.dims() - 1;
+    int last_dim_size = input_shape.dim_size(last_dim);
     OP_REQUIRES(
-        context, input_shape.dim_size(input_shape.dims() - 1) >= k,
+        context, last_dim_size >= k,
         errors::InvalidArgument("input must have at least k columns. Had ",
-                                input_shape.dim_size(input_shape.dims() - 1),
-                                ", needed ", k));
-
-    OP_REQUIRES(
-        context, input_shape.dims() == 1,
-        errors::Unimplemented("TopK is implemented for 1-D inputs, got shape ",
-                              input_shape.DebugString()));
-
-    const int64 n = input_shape.dim_size(0);
-    OP_REQUIRES(context, n < (1 << 16),
-                errors::Unimplemented(
-                    "TopK is implemented for sizes up to 2**16, got shape ",
-                    input_shape.DebugString()));
-
-    xla::XlaBuilder* const b = context->builder();
-    if (input_shape.dim_size(0) < k) {
-      k = input_shape.dim_size(0);
+                                last_dim_size, ", needed ", k));
+    if (last_dim_size < k) {
+      k = last_dim_size;
     }
-    const xla::XlaOp input = context->Input(0);
-    xla::XlaOp iota;
-    OP_REQUIRES_OK(context, XlaHelpers::Iota(b, DT_INT32, n, &iota));
-
-    // TODO(b/73891930): add a key-value sort to HLO, rather than using
-    // bit-packing tricks here.
-    // TODO(b/73891930): this implementation will convert Infs to NaNs. A
-    // key-value sort would avoid this; for now, it is no worse than, say, the
-    // CPU backend in fast-math mode.
-
-    // Pack elements as:
-    // * upper 16 bits are the value
-    // * lower 16 bits are the index.
-    xla::XlaOp packed = b->BitcastConvertType(
-        b->Or(b->BitcastConvertType(b->ConvertElementType(input, xla::F32),
-                                    xla::S32),
-              iota),
-        xla::F32);
-
-    // TODO(phawkins): use a more efficient algorithm that does not require a
-    // full sort.
-    xla::XlaOp sorted = b->Slice(b->Rev(b->Sort(packed), {0}),
-                                 /*start_indices=*/{0},
-                                 /*limit_indices=*/{k},
-                                 /*strides=*/{1});
-
-    // Unpack the value/index
-    xla::XlaOp x = b->BitcastConvertType(sorted, xla::S32);
-    xla::XlaOp indices = b->And(x, b->ConstantR0<int32>(0x0000FFFF));
-    xla::XlaOp values = b->ConvertElementType(
-        b->BitcastConvertType(b->And(x, b->ConstantR0<int32>(0xFFFF0000)),
-                              xla::F32),
-        xla::BF16);
-
-    context->SetOutput(0, values);
-    context->SetOutput(1, indices);
+    xla::XlaOp output_tuple = TopK(context->Input(0), k);
+    context->SetOutput(0, xla::GetTupleElement(output_tuple, 0));
+    context->SetOutput(1, xla::GetTupleElement(output_tuple, 1));
   }
 
  private:
   bool sorted_;
 };
 
-REGISTER_XLA_OP(
-    Name("TopKV2").CompileTimeConstInput("k").TypeConstraint("T", DT_BFLOAT16),
-    TopKOp);
+REGISTER_XLA_OP(Name("TopKV2").CompileTimeConstInput("k").TypeConstraint(
+                    "T", {DT_UINT32, DT_INT32, DT_FLOAT, DT_BFLOAT16}),
+                TopKOp);
 
 }  // namespace
 }  // namespace tensorflow

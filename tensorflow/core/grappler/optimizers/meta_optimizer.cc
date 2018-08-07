@@ -87,11 +87,12 @@ std::unique_ptr<GraphOptimizer> MetaOptimizer::MakeNewOptimizer(
   MK_OPT("memory", new MemoryOptimizer(RewriterConfig::MANUAL));
   MK_OPT("arithmetic", new ArithmeticOptimizer(cfg_.arithmetic_optimization()));
   MK_OPT("autoparallel", new AutoParallel(cfg_.auto_parallel().num_replicas()));
-  MK_OPT("loop", new LoopOptimizer(cfg_.loop_optimization()));
+  MK_OPT("loop", new LoopOptimizer(cfg_.loop_optimization(), cpu_device_));
   MK_OPT("dependency", new DependencyOptimizer(cfg_.dependency_optimization()));
   MK_OPT("debug_stripper", new DebugStripper());
   MK_OPT("scoped_allocator",
-         new ScopedAllocatorOptimizer(cfg_.scoped_allocator_opts()));
+         new ScopedAllocatorOptimizer(cfg_.scoped_allocator_optimization(),
+                                      cfg_.scoped_allocator_opts()));
 
   return std::unique_ptr<GraphOptimizer>();
 }
@@ -125,7 +126,8 @@ Status MetaOptimizer::InitializeOptimizers(
         new ArithmeticOptimizer(cfg_.arithmetic_optimization()));
   }
   if (cfg_.loop_optimization() != RewriterConfig::OFF) {
-    optimizers->emplace_back(new LoopOptimizer(cfg_.loop_optimization()));
+    optimizers->emplace_back(
+        new LoopOptimizer(cfg_.loop_optimization(), cpu_device_));
   }
   if (cfg_.dependency_optimization() != RewriterConfig::OFF) {
     optimizers->emplace_back(
@@ -150,8 +152,8 @@ Status MetaOptimizer::InitializeOptimizers(
         new AutoParallel(cfg_.auto_parallel().num_replicas()));
   }
   if (cfg_.scoped_allocator_optimization()) {
-    optimizers->emplace_back(
-        new ScopedAllocatorOptimizer(cfg_.scoped_allocator_opts()));
+    optimizers->emplace_back(new ScopedAllocatorOptimizer(
+        cfg_.scoped_allocator_optimization(), cfg_.scoped_allocator_opts()));
   }
   return Status::OK();
 }

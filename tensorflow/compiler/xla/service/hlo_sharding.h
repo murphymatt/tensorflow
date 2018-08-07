@@ -19,10 +19,12 @@ limitations under the License.
 #ifndef TENSORFLOW_COMPILER_XLA_SERVICE_HLO_SHARDING_H_
 #define TENSORFLOW_COMPILER_XLA_SERVICE_HLO_SHARDING_H_
 
+#include <map>
 #include <string>
+#include <vector>
 
 #include "tensorflow/compiler/xla/array.h"
-#include "tensorflow/compiler/xla/literal_util.h"
+#include "tensorflow/compiler/xla/literal.h"
 #include "tensorflow/compiler/xla/protobuf_util.h"
 #include "tensorflow/compiler/xla/shape_tree.h"
 #include "tensorflow/compiler/xla/xla_data.pb.h"
@@ -78,6 +80,15 @@ class HloSharding {
   static HloSharding Tuple(const Shape& tuple_shape,
                            tensorflow::gtl::ArraySlice<HloSharding> shardings);
 
+  // Creates a new sharding for a tuple type, with a single input sharding
+  // repeated on each leaf.
+  static HloSharding SingleTuple(const Shape& tuple_shape,
+                                 const HloSharding& sharding);
+
+  // If shape is an array, returns sharding, otherwise returns the tuple shaped
+  // sharding with all the leaf nodes having the same input sharding.
+  static HloSharding Single(const Shape& shape, const HloSharding& sharding);
+
   // Create a new sharding from a protobuf OpSharding.
   static StatusOr<HloSharding> FromProto(const OpSharding& proto);
 
@@ -118,6 +129,14 @@ class HloSharding {
   // Returns true if the sharding defines an operation on the given device.
   bool UsesDevice(int64 device) const;
 
+  // Retrieves an histogram of the devices used by the sharding. The returned
+  // map has the device number as key, and the occurrence count as value.
+  // If a sharding does not have a device, it will not be incuded in the
+  // histogram. The count argument, if not nullptr, will receive the total
+  // number of elements this sharding is made of (one for array, N leaves for
+  // tuples).
+  std::map<int64, int64> UsedDevices(int64* count) const;
+
   // Returns the tile that should be executed on the given device.
   // REQUIRES: !IsTuple()
   std::vector<int64> TileIndexForDevice(int64 device) const;
@@ -139,12 +158,17 @@ class HloSharding {
   // REQUIRES: !IsTuple()
   std::vector<int64> TileLimitForDevice(int64 device) const;
 
-  // Returns the single device this op operates on.
-  // REQUIRES: !IsTuple&& !Replicated() && IsTileMaximal()
-  StatusOr<int64> UniqueDevice() const;
+  // Returns the single device this op operates on. If the sharding does not
+  // span a single device, the return value will be empty.
+  // In order for a sharding to span a single device, every leaf sharding must
+  // be maximal and not replicated, and the used device must match.
+  tensorflow::gtl::optional<int64> UniqueDevice() const;
+
+  // Retrieves the unique device or fails with a CHECK.
+  int64 GetUniqueDevice() const;
 
   // Returns true if this op only uses a single device.
-  bool HasUniqueDevice() const;
+  bool HasUniqueDevice() const { return UniqueDevice().has_value(); }
 
   // Returns the ShapeTree containing the shardings for each element of this
   // tuple, if IsTuple, or a ShapeTree with a single element containing this
@@ -179,26 +203,7 @@ class HloSharding {
   }
   bool operator!=(const HloSharding& other) const { return !(*this == other); }
 
-  size_t Hash() const {
-    if (!tuple_) {
-      size_t h = 0;
-      for (const auto& element : tuple_elements_) {
-        h = tensorflow::Hash64Combine(h, element.Hash());
-      }
-      return h;
-    }
-    if (replicated_) {
-      return 0;
-    }
-    size_t h = 0;
-    for (uint32 v : tile_assignment_) {
-      h = tensorflow::Hash64Combine(h, std::hash<uint32>{}(v));
-    }
-    for (uint32 v : tile_shape_.dimensions()) {
-      h = tensorflow::Hash64Combine(h, std::hash<uint32>{}(v));
-    }
-    return h;
-  }
+  size_t Hash() const;
 
   struct Hasher {
     size_t operator()(const HloSharding& sharding) const {

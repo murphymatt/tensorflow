@@ -130,7 +130,7 @@ class FuncRegistry(object):
   def __init__(self):
     self._lock = threading.Lock()
     self._unique_id = 0  # GUARDED_BY(self._lock)
-    # Only store weakrefs to the funtions. The strong reference is stored in
+    # Only store weakrefs to the functions. The strong reference is stored in
     # the graph.
     self._funcs = weakref.WeakValueDictionary()
 
@@ -343,7 +343,7 @@ def eager_py_func(func, inp, Tout, name=None):
   or print statements as desired, and wrap those functions in
   `tf.contrib.eager.py_func`.
 
-  For more information on eager execution, see @{$programmers_guide/eager}.
+  For more information on eager execution, see @{$guide/eager}.
 
   `tf.contrib.eager.py_func` is similar in spirit to @{tf.py_func}, but unlike
   the latter, the former lets you use TensorFlow operations in the wrapped

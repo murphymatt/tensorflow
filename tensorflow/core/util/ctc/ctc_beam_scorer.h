@@ -149,12 +149,15 @@ class TrieBeamScorer : public BaseBeamScorer<TrieBeamState> {
   // allow a final scoring of the beam in its current state, before resorting
   // and retrieving the TopN requested candidates. Called at most once per beam.
   void ExpandStateEnd(TrieBeamState* state) const override {
+    std::cout << "ExpandStateEnd" << std::endl;
     if (state->incomplete_word_trie_node == nullptr ||
         !state->incomplete_word_trie_node->IsEnd()) {
       state->incomplete_word.clear();
       state->incomplete_word_trie_node = nullptr;
       state->score = kLogZero;
     } else {
+      for (int i : state->incomplete_word) std::cout << i << " ";
+      std::cout << std::endl;
       state->score = std::log(1.0);
     }
   }

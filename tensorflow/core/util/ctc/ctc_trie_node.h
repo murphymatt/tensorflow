@@ -23,7 +23,6 @@ limitations under the License.
 #include <memory>
 #include <vector>
 #include <iostream>
-
 #include "tensorflow/core/util/ctc/ctc_vocabulary.h"
 
 namespace tensorflow {
@@ -58,7 +57,7 @@ class TrieNode {
 
     // we're building the trie from a SparseTensorValue
     // each insertion is a dense vector of int labels
-    void Insert(std::vector<int32> word) {
+    void Insert(std::vector<int> word) {
       // if word we are inserting is the end, then set the appropriate flag
       if (word.empty()) {
         endWord = true;
@@ -66,7 +65,7 @@ class TrieNode {
       }
 
       prefixCount++;
-      int32 wordChar = word.at(0);
+      int wordChar = word.at(0);
       if (wordChar <= vocabSize && wordChar >= 0) {
         // search for child node in word vector
         TrieNode *child_node = GetChildAt(wordChar);
@@ -79,7 +78,7 @@ class TrieNode {
       }
     }
 
-    int32 GetLabel() {
+    int GetLabel() {
       return label;
     }
 
@@ -87,13 +86,13 @@ class TrieNode {
       return endWord;
     }
 
-    TrieNode* GetChildAt(int32 label) {
+    TrieNode* GetChildAt(int label) {
       auto iter = children.find(label);
       return iter != children.end() ? iter->second : nullptr;
     }
 
-    std::vector<int32> GetTrieLabels() {
-      std::vector<int32> labs;
+    std::vector<int> GetTrieLabels() {
+      std::vector<int> labs;
       labs = __GetTrieLabels(labs);
       return labs;
     }
@@ -126,9 +125,9 @@ class TrieNode {
     }
 
   private:
-    typedef std::unordered_map<int32, TrieNode*> TrieMap;
+    typedef std::unordered_map<int, TrieNode*> TrieMap;
 
-    int32 label;
+    int label;
     int prefixCount;
     int vocabSize;
     bool endWord;
@@ -138,7 +137,7 @@ class TrieNode {
       in >> label >> prefixCount;
     }
 
-    std::vector<int32> __GetTrieLabels(std::vector<int32> labs) {
+    std::vector<int> __GetTrieLabels(std::vector<int> labs) {
       labs.push_back(label);
       for (const auto& c : children) {
         labs = c.second->__GetTrieLabels(labs);

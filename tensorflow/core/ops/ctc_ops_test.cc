@@ -94,4 +94,39 @@ TEST(CtcOpsTest, CTCBeamSearchDecoder_ShapeFn) {
   INFER_OK(op, "?;?", "[?,2];[?,2];[?];[?];[2];[2];[?,2]");
 }
 
+TEST(CtcOpsTest, CTCBeamSearchDecoderTrie_ShapeFn) {
+  ShapeInferenceTestOp op("CTCBeamSearchDecoderTrie");
+  auto set_top_paths = [&op](int top_paths) {
+    TF_ASSERT_OK(NodeDefBuilder("test", "CTCBeamSearchDecoderTrie")
+                     .Input({"a", 0, DT_FLOAT})
+                     .Input({"b", 0, DT_INT32})
+	             .Input({"c", 0, DT_INT32})
+		     .Input({"d", 0, DT_INT32})
+                     .Attr("top_paths", top_paths)
+                     .Finalize(&op.node_def));
+  };
+  set_top_paths(1);
+
+  // Inputs are inputs, sequence_length, alphabet_size and dictionary.
+
+  // Rank checks
+  INFER_ERROR("must be rank 3", op, "[];?;?;?");  // inputs
+  INFER_ERROR("must be rank 1", op, "?;[];?;?");  // sequence_length
+  INFER_ERROR("must be rank 0", op, "?;?;[];?");  // alphabet_size
+  INFER_ERROR("must be rank 2", op, "?;?;?;[]");  // dictionary
+
+  // batch_size comes from inputs.dim(1) merged with sequence_length.dim(0).
+  // This becomes dim(0) of the final output shape.
+  INFER_OK(op, "[?,?,?];[?];[?];[?]", "[?,2];[?];[2];[d0_1|d1_0,1]");
+  INFER_OK(op, "[?,1,?];[1];[?];[?]", "[?,2];[?];[2];[d0_1|d1_0,1]");
+  INFER_OK(op, "[?,?,?];[1];[?];[?]", "[?,2];[?];[2];[d1_0,1]");
+  INFER_OK(op, "[?,1,?];[?];[?];[?]", "[?,2];[?];[2];[d0_1,1]");
+  INFER_ERROR("must be equal", op, "[?,1,?];[2];[?];[?]");
+
+  // test higher top_paths value. Compared to top_paths=1, each of first 3 dims
+  // is doubled, and final shape.dim(1) becomes 2.
+  set_top_paths(2);
+  INFER_OK(op, "?;?", "[?,2];[?,2];[?];[?];[2];[2];[?,2]");
+}
+
 }  // end namespace tensorflow

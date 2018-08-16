@@ -21,12 +21,18 @@ namespace {
 using tensorflow::ctc::TrieNode;
 using tensorflow::ctc::Vocabulary;
 
-const int32 test_labels_count = 35;
-const int32 test_labels[] = {-1, 19, 7, 4, 16, 20, 8, 2, 10, 1, 17, 14, 22, 13,
-                            5, 14, 23, 9, 20, 12, 15, 4, 3, 14, 21, 4, 17, 0,
-                            11, 0, 25, 24, 3, 14, 6};
+int alpha_size = 26;
+const int test_labels_count = 35;
+const int test_labels[] = {-1, 19, 7, 4, 16, 20, 8, 2, 10, 1, 17, 14, 22, 13,
+                           5, 14, 23, 9, 20, 12, 15, 18, 14, 21, 4, 17, 0, 11,
+                           0, 25, 24, 3, 14, 6};
 
-const char *vocabulary_path = "./tensorflow/core/util/ctc/testdata/vocab";
+std::vector<std::vector<int>> vocab_vec = {
+  {19, 7, 4}, {16, 20, 8, 2, 10}, {1, 17, 14, 22, 13}, {5, 14, 23}, 
+  {9, 20, 12, 15, 18}, {14, 21, 4, 17}, {0}, {11, 0, 25, 24}, {3, 14, 6}};
+
+// const char *vocabulary_path = "./tensorflow/core/util/ctc/testdata/vocab";
+const char *vocabulary_path = "testdata/vocab";
 
 void __printTrie(TrieNode *root) {
   std::cout << root->GetLabel() << std::endl;
@@ -36,23 +42,30 @@ void __printTrie(TrieNode *root) {
 }
 
 TEST(TrieNode, VocabularyFromFile) {
-  Vocabulary vocabulary(vocabulary_path);
+  Vocabulary vocabulary(vocab_vec, alpha_size);
+  std::cout << "Vocabulary:" << std::endl;
+  vocabulary.PrintVocab();
   EXPECT_EQ(9, vocabulary.GetVocabSize());
 }
 
 TEST(TrieNode, TrieConstructionTest) {
-  Vocabulary vocabulary(vocabulary_path);
+  Vocabulary vocabulary(vocab_vec, alpha_size);
 
   TrieNode root(-1);
-  std::vector<std::vector<int32>> vocab_list = vocabulary.GetVocabList();
-  for (std::vector<int32> word : vocab_list) {
+  std::vector<std::vector<int>> vocab_list = vocabulary.GetVocabList();
+  for (std::vector<int> word : vocab_list) {
+    for (int c : word) {
+      std::cout << c;
+    }
+    std::cout << std::endl;
     root.Insert(word);
   }
 
   __printTrie(&root);
 
-  std::vector<int32> node_labs = root.GetTrieLabels();
+  std::vector<int> node_labs = root.GetTrieLabels();
   std::cout << "Vector size:  " << node_labs.size() << std::endl;
+  EXPECT_EQ(node_labs.size(), test_labels_count);
   for (int i=0; i < node_labs.size(); ++i) {
     EXPECT_EQ(node_labs.at(i), test_labels[i]);
   }
